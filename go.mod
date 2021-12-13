@@ -1,4 +1,4 @@
-module git.int.avast.com/seidl/rmq_stats
+module github.com/JaSei/amqp-statisticator
 
 go 1.17
 

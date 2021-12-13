@@ -15,23 +15,22 @@ type AMQP struct {
 }
 
 func newAmqp() AMQP {
-	//conn, err := amqp.Dial(*rmqURI)
 	cfg := new(tls.Config)
-	if *rmqCaCert != "" {
-		cacertfile, err := pathutil.New(*rmqCaCert)
+	if *amqpCaCert != "" {
+		cacertfile, err := pathutil.New(*amqpCaCert)
 		if err != nil {
-			log.Fatalf("Open file %s fail: %s", *rmqCaCert, err)
+			log.Fatalf("Open file %s fail: %s", *amqpCaCert, err)
 		}
 
 		cfg.RootCAs = x509.NewCertPool()
 
 		ca, err := cacertfile.SlurpBytes()
 		if err != nil {
-			log.Fatalf("Read file %s fail: %s", *rmqCaCert, err)
+			log.Fatalf("Read file %s fail: %s", *amqpCaCert, err)
 		}
 		cfg.RootCAs.AppendCertsFromPEM(ca)
 	}
-	conn, err := amqp.DialTLS(*rmqURI, cfg)
+	conn, err := amqp.DialTLS(*amqpURI, cfg)
 	if err != nil {
 		log.Fatalf("connection.open: %s", err)
 	}
@@ -61,10 +60,31 @@ func newAmqp() AMQP {
 	return AMQP{conn, c}
 }
 
-func (rmq AMQP) Close() error {
-	rmq.channel.Cancel(consumerName, false)
-	rmq.channel.Close()
-	rmq.connection.Close()
+//StartConsumers start consumer pool defined by function
+func (a AMQP) StartConsumers(queue string, countOfConsumers uint8, consumerFunc func(<-chan amqp.Delivery, chan<- ExchangeStats)) <-chan ExchangeStats {
+	collector := make(chan ExchangeStats, 128)
 
-	return nil
+	q, err := a.channel.Consume(queue, *consumerName, false, false, false, false, nil)
+	for i := uint8(0); i < countOfConsumers; i++ {
+		if err != nil {
+			log.Fatalf("basic.consume: %v", err)
+		}
+
+		go consumerFunc(q, collector)
+	}
+
+	return collector
+}
+
+//Close close all channels and conncetions correctly
+func (a AMQP) Close() {
+	if err := a.channel.Cancel(*consumerName, false); err != nil {
+		log.Printf("Cancel channel fail %s", err)
+	}
+	if err := a.channel.Close(); err != nil {
+		log.Printf("Close channel fail %s", err)
+	}
+	if err := a.connection.Close(); err != nil {
+		log.Printf("Close conncetion fail %s", err)
+	}
 }

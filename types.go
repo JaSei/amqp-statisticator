@@ -11,16 +11,7 @@ type RoutingStat struct {
 	MaxSize  uint64 `json:"max_size"`
 }
 
-func (st *RoutingStat) add(count, msgSize uint64) {
-	st.Count += count
-	st.BodySize += msgSize
-
-	if msgSize > st.MaxSize {
-		st.MaxSize = msgSize
-	}
-}
-
-func (st *RoutingStat) addWithMaxSize(count, msgSize, maxSize uint64) {
+func (st *RoutingStat) add(count, msgSize, maxSize uint64) {
 	st.Count += count
 	st.BodySize += msgSize
 
@@ -30,20 +21,22 @@ func (st *RoutingStat) addWithMaxSize(count, msgSize, maxSize uint64) {
 }
 
 type Stats struct {
-	count             uint64
-	avgMsgPerSec      float64
-	avgBodySize       uint64
-	avgBodySizePerSec uint64
-	maxSize           uint64
-	totalSize         uint64
+	Exchange          ExchangeName   `json:"exchange"`
+	RoutingKey        RoutingKeyName `json:"routing_key"`
+	Count             uint64         `json:"count"`
+	AvgMsgPerSec      float64        `json:"avg_msg_per_sec"`
+	AvgBodySize       uint64         `json:"avg_body_size"`
+	AvgBodySizePerSec uint64         `json:"avg_body_size_per_sec"`
+	MaxSize           uint64         `json:"max_size"`
+	TotalSize         uint64         `json:"total_size"`
 }
 
-func (st RoutingStat) stats(dur time.Duration) Stats {
-	ret := Stats{count: st.Count, maxSize: st.MaxSize, totalSize: st.BodySize}
+func (st RoutingStat) stats(exchange ExchangeName, routingKey RoutingKeyName, dur time.Duration) Stats {
+	ret := Stats{Exchange: exchange, RoutingKey: routingKey, Count: st.Count, MaxSize: st.MaxSize, TotalSize: st.BodySize}
 
-	ret.avgMsgPerSec = float64(st.Count) / dur.Seconds()
-	ret.avgBodySize = st.BodySize / st.Count
-	ret.avgBodySizePerSec = uint64(float64(st.BodySize) / dur.Seconds())
+	ret.AvgMsgPerSec = float64(st.Count) / dur.Seconds()
+	ret.AvgBodySize = st.BodySize / st.Count
+	ret.AvgBodySizePerSec = uint64(float64(st.BodySize) / dur.Seconds())
 
 	return ret
 }

@@ -1,38 +1,37 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"log"
 	"math/big"
 	"time"
 
+	"github.com/JaSei/pathutil-go"
 	"github.com/dustin/go-humanize"
 	"github.com/gdamore/tcell/v2"
 
-	//ui "github.com/gizak/termui/v3"
-	//"github.com/gizak/termui/v3/widgets"
 	"code.rocketnine.space/tslocum/cview"
 	amqp "github.com/rabbitmq/amqp091-go"
 	"gopkg.in/alecthomas/kingpin.v2"
 )
 
 var (
-	rmqURI    = kingpin.Flag("rmq", "RabbitMQ connection URI without query params - https://www.rabbitmq.com/uri-spec.html").Required().String()
-	rmqCaCert = kingpin.Flag("rmqcacert", "cacertfile for rmq SSL connection").String()
-	consumers = kingpin.Flag("consumers", "Amount of conusmers per queue").Default("2").Uint8()
-	output    = kingpin.Flag("output", "json per line output file path").String()
-	exchanges = kingpin.Flag("exchange", "exchange what you want to consume").Required().Strings()
-	queue     = kingpin.Flag("queue", "destination queue for metricator").Required().String()
+	amqpURI      = kingpin.Flag("uri", "RabbitMQ connection URI without query params - https://www.rabbitmq.com/uri-spec.html").Required().String()
+	amqpCaCert   = kingpin.Flag("amqpcacert", "custom CA cert file for rmq SSL connection").String()
+	consumers    = kingpin.Flag("consumers", "Amount of conusmers per queue").Default("2").Uint8()
+	output       = kingpin.Flag("output", "json per line output file path").String()
+	exchanges    = kingpin.Flag("exchange", "exchange what you want to consume").Required().Strings()
+	queue        = kingpin.Flag("queue", "destination queue for metricator").Required().String()
+	consumerName = kingpin.Flag("consumername", "name of consumer registered in broker").Default("amqp-statisticator").String()
 )
 
-const consumerName = "rabbit_statisticator"
-
-var header = []string{"exchange", "routing key", "total messages", "messages per sec", "avg size", "size per sec", "max size", "total size"}
+var header = []string{"exchange", "routing key", "total messages", "total size", "messages per sec", "size per sec", "max size", "avg size"}
 
 func main() {
 	kingpin.Parse()
 
-	amqp := newAmqp()
+	amqpConn := newAmqp()
 
 	app := cview.NewApplication()
 	defer app.HandlePanic()
@@ -51,88 +50,49 @@ func main() {
 		table.SetCellSimple(0, i, v)
 	}
 
-	//if err := ui.Init(); err != nil {
-	//	log.Fatalf("failed to initialize termui: %v", err)
-	//}
-	//defer ui.Close()
+	collector := amqpConn.StartConsumers(*queue, *consumers, consumer)
 
-	//termWidth, termHeight := ui.TerminalDimensions()
-
-	//table := widgets.NewTable()
-	//table.SetRect(0, 0, termWidth, termHeight)
-
-	collector := make(chan ExchangeStats, 128)
-
-	q, err := amqp.channel.Consume(*queue, consumerName, false, false, false, false, nil)
-	for i := uint8(0); i < *consumers; i++ {
-		if err != nil {
-			log.Fatalf("basic.consume: %v", err)
-		}
-
-		go consumer(q, collector)
+	amountOfStatsConsumers := uint8(1)
+	if *output != "" {
+		amountOfStatsConsumers++
 	}
 
+	finalStats := collectAggregationsAndMakeFinalStat(collector, amountOfStatsConsumers)
+
 	go func() {
-		tick := time.Tick(time.Second)
-		start := time.Now()
-		total := make(ExchangeStats)
-		for {
-			select {
-			case exchangeStat := <-collector:
-				collectAggregates(&total, exchangeStat)
-			case <-tick:
-				dur := time.Since(start)
-
-				//table.Rows = make([][]string, total.countOfRoutingKeys()+1)
-				//table.Rows[0] = []string{"exchange", "routing key", "messages per sec", "avg messages", "avg size", "size per sec", "max size"}
-				//table.RowStyles[0] = ui.NewStyle(ui.ColorWhite, ui.ColorBlack, ui.ModifierBold)
-
-				id := 1
-				for _, exchange := range total.sortedKeys() {
-					exchangeStat := total[exchange]
-					exchangeId := id
-					id++
-
-					total := RoutingStat{}
-					for _, routingKey := range exchangeStat.sortedKeys() {
-						routingStat := exchangeStat.get(routingKey)
-						rs := routingStat.stats(dur)
-						//editTable(table.Rows, id, "", routingKey, rs)
-						//table.RowStyles[id] = ui.NewStyle(ui.ColorWhite)
-						refreshTable(table, id, "", routingKey, rs)
-
-						total.addWithMaxSize((*routingStat).Count, (*routingStat).BodySize, (*routingStat).MaxSize)
-
-						id++
-					}
-
-					totalStat := total.stats(dur)
-					//log.Print(totalStat, exchangeId)
-					refreshTable(table, exchangeId, exchange, "#", totalStat)
-					//table.RowStyles[exchangeId] = ui.NewStyle(ui.ColorWhite, ui.ColorBlue, ui.ModifierBold)
-
-				}
-
-				//ui.Render(table)
+		for statList := range finalStats[0] {
+			for i, stat := range statList {
+				refreshTable(table, i, stat)
 			}
+			app.Draw()
 		}
 	}()
 
-	//uiEvents := ui.PollEvents()
-	//for {
-	//	e := <-uiEvents
-	//	switch e.ID {
-	//	case "q", "<C-c>":
-	//		return
-	//	}
-	//}
-
 	go func() {
-		ticker := time.Tick(time.Second)
+		ticker := time.Tick(60 * time.Second)
+		var lastStat []Stats
+
+		if len(finalStats) < 2 {
+			return
+		}
+
+		out, err := pathutil.New(*output)
+		if err != nil {
+			log.Fatal(err)
+		}
+
 		for {
 			select {
 			case <-ticker:
-				app.Draw()
+				jOut, err := json.Marshal(lastStat)
+				if err != nil {
+					log.Fatal(err)
+				}
+				if err = out.Append(string(jOut) + "\n"); err != nil {
+					log.Fatal(err)
+				}
+
+			case lastStat = <-finalStats[1]:
 			}
 		}
 	}()
@@ -141,6 +101,8 @@ func main() {
 	if err := app.Run(); err != nil {
 		panic(err)
 	}
+
+	amqpConn.Close()
 }
 
 func consumer(q <-chan amqp.Delivery, collector chan<- ExchangeStats) {
@@ -160,43 +122,92 @@ func consumer(q <-chan amqp.Delivery, collector chan<- ExchangeStats) {
 			routingStat := (*exchangeStat).get(routingKey)
 
 			msgSize := uint64(len(msg.Body))
-			routingStat.add(1, msgSize)
+			routingStat.add(1, msgSize, msgSize)
 
-			msg.Ack(false)
+			err := msg.Ack(false)
+			if err != nil {
+				log.Fatalf("Ack failed %s", err)
+			}
 		}
 	}
 }
 
-//func editTable(row [][]string, index int, exchange ExchangeName, routingKey RoutingKeyName, stat Stats) {
-//	count := new(big.Int).SetUint64(stat.count)
-//	row[index] = []string{
-//		string(exchange),
-//		string(routingKey),
-//		fmt.Sprintf("%s", humanize.BigComma(count)),
-//		fmt.Sprintf("%0.1f", stat.avgMsgPerSec),
-//		fmt.Sprintf("%s", humanize.Bytes(stat.avgBodySize)),
-//		fmt.Sprintf("%s/s", humanize.Bytes(stat.avgBodySizePerSec)),
-//		fmt.Sprintf("%s", humanize.Bytes(stat.maxSize)),
-//	}
-//}
+func refreshTable(table *cview.Table, index int, stat Stats) {
+	//index is shift because header
+	index++
+	count := new(big.Int).SetUint64(stat.Count)
 
-func refreshTable(table *cview.Table, index int, exchange ExchangeName, routingKey RoutingKeyName, stat Stats) {
-	count := new(big.Int).SetUint64(stat.count)
-
-	table.SetCellSimple(index, 0, string(exchange))
-	table.SetCellSimple(index, 1, string(routingKey))
+	table.SetCellSimple(index, 0, string(stat.Exchange))
+	table.SetCellSimple(index, 1, string(stat.RoutingKey))
 	table.SetCellSimple(index, 2, humanize.BigComma(count))
-	table.SetCellSimple(index, 3, fmt.Sprintf("%0.1f", stat.avgMsgPerSec))
-	table.SetCellSimple(index, 4, humanize.Bytes(stat.avgBodySize))
-	table.SetCellSimple(index, 5, fmt.Sprintf("%s/s", humanize.Bytes(stat.avgBodySizePerSec)))
-	table.SetCellSimple(index, 6, humanize.Bytes(stat.maxSize))
-	table.SetCellSimple(index, 7, humanize.Bytes(stat.totalSize))
+	table.SetCellSimple(index, 3, humanize.Bytes(stat.TotalSize))
+	table.SetCellSimple(index, 4, fmt.Sprintf("%0.1f", stat.AvgMsgPerSec))
+	table.SetCellSimple(index, 5, fmt.Sprintf("%s/s", humanize.Bytes(stat.AvgBodySizePerSec)))
+	table.SetCellSimple(index, 6, humanize.Bytes(stat.MaxSize))
+	table.SetCellSimple(index, 7, humanize.Bytes(stat.AvgBodySize))
+}
+
+func collectAggregationsAndMakeFinalStat(collector <-chan ExchangeStats, amountOfStatsConsumers uint8) []chan []Stats {
+	tick := time.Tick(time.Second)
+	start := time.Now()
+	total := make(ExchangeStats)
+
+	statsChan := make([]chan []Stats, amountOfStatsConsumers)
+	for i := uint8(0); i < amountOfStatsConsumers; i++ {
+		statsChan[i] = make(chan []Stats, 2)
+	}
+
+	go func() {
+		for {
+			select {
+			case exchangeStat := <-collector:
+				collectAggregates(&total, exchangeStat)
+			case <-tick:
+				dur := time.Since(start)
+
+				statsList := make([]Stats, total.countOfRoutingKeys()+1)
+
+				totalStat := RoutingStat{}
+
+				id := 1
+				for _, exchange := range total.sortedKeys() {
+					exchangeStat := total[exchange]
+					exchangeId := id
+					id++
+
+					wholeExchangeStat := RoutingStat{}
+					for _, routingKey := range exchangeStat.sortedKeys() {
+						routingKeyStat := exchangeStat.get(routingKey)
+
+						wholeExchangeStat.add((*routingKeyStat).Count, (*routingKeyStat).BodySize, (*routingKeyStat).MaxSize)
+						totalStat.add((*routingKeyStat).Count, (*routingKeyStat).BodySize, (*routingKeyStat).MaxSize)
+
+						routingStat := routingKeyStat.stats(exchange, routingKey, dur)
+						statsList[id] = routingStat
+
+						id++
+					}
+
+					totalStat := wholeExchangeStat.stats(exchange, "#", dur)
+					statsList[exchangeId] = totalStat
+				}
+
+				statsList[0] = totalStat.stats("_total_", "#", dur)
+
+				for i := uint8(0); i < amountOfStatsConsumers; i++ {
+					statsChan[i] <- statsList
+				}
+			}
+		}
+	}()
+
+	return statsChan
 }
 
 func collectAggregates(total *ExchangeStats, lastStat ExchangeStats) {
 	for ex, exStat := range lastStat {
 		for routingKey, stat := range *exStat {
-			total.get(ex).get(routingKey).add(stat.Count, stat.BodySize)
+			total.get(ex).get(routingKey).add(stat.Count, stat.BodySize, stat.BodySize)
 		}
 	}
 }
