@@ -2,7 +2,7 @@
 
 Tool for collect statistics around your AMQP broker. For example RabbitMQ expose a lot information trought the management API, but size of messages missing. And when you want to calculate amount of data (for example for cloud native service calculation), you need it.
 
-This tool have simple UI for fast lookup and it's possible to flush those data to file for deeper analysis.
+This tool have simple terminal UI for fast lookup and it's possible to flush those data to file for deeper analysis.
 
 ## --help
 ```
