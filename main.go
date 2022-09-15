@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -9,7 +10,6 @@ import (
 
 	"github.com/JaSei/pathutil-go"
 	"github.com/dustin/go-humanize"
-	"github.com/gdamore/tcell/v2"
 
 	"code.rocketnine.space/tslocum/cview"
 	amqp "github.com/rabbitmq/amqp091-go"
@@ -31,7 +31,9 @@ var header = []string{"exchange", "routing key", "total messages", "total size",
 func main() {
 	kingpin.Parse()
 
-	amqpConn := newAmqp()
+	ctx, cancel := context.WithCancel(context.Background())
+
+	amqpConn := newAmqp(ctx)
 
 	app := cview.NewApplication()
 	defer app.HandlePanic()
@@ -40,11 +42,6 @@ func main() {
 
 	table := cview.NewTable()
 	table.SetBorders(true)
-	table.SetDoneFunc(func(key tcell.Key) {
-		if key == tcell.KeyEscape {
-			app.Stop()
-		}
-	})
 
 	for i, v := range header {
 		table.SetCellSimple(0, i, v)
@@ -57,14 +54,19 @@ func main() {
 		amountOfStatsConsumers++
 	}
 
-	finalStats := collectAggregationsAndMakeFinalStat(collector, amountOfStatsConsumers)
+	finalStats := collectAggregationsAndMakeFinalStat(ctx, collector, amountOfStatsConsumers)
 
 	go func() {
-		for statList := range finalStats[0] {
-			for i, stat := range statList {
-				refreshTable(table, i, stat)
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case statList := <-finalStats[0]:
+				for i, stat := range statList {
+					refreshTable(table, i, stat)
+				}
+				app.Draw()
 			}
-			app.Draw()
 		}
 	}()
 
@@ -83,6 +85,8 @@ func main() {
 
 		for {
 			select {
+			case <-ctx.Done():
+				return
 			case <-ticker:
 				jOut, err := json.Marshal(lastStat)
 				if err != nil {
@@ -102,15 +106,21 @@ func main() {
 		panic(err)
 	}
 
+	log.Println("cancel")
+
+	cancel()
+
 	amqpConn.Close()
 }
 
-func consumer(q <-chan amqp.Delivery, collector chan<- ExchangeStats) {
+func consumer(ctx context.Context, q <-chan amqp.Delivery, collector chan<- ExchangeStats) {
 	consumerAggregation := make(ExchangeStats)
 	ticker := time.Tick(time.Second)
 
 	for {
 		select {
+		case <-ctx.Done():
+			return
 		case <-ticker:
 			collector <- consumerAggregation
 			consumerAggregation = make(ExchangeStats)
@@ -147,7 +157,7 @@ func refreshTable(table *cview.Table, index int, stat Stats) {
 	table.SetCellSimple(index, 7, humanize.Bytes(stat.AvgBodySize))
 }
 
-func collectAggregationsAndMakeFinalStat(collector <-chan ExchangeStats, amountOfStatsConsumers uint8) []chan []Stats {
+func collectAggregationsAndMakeFinalStat(ctx context.Context, collector <-chan ExchangeStats, amountOfStatsConsumers uint8) []chan []Stats {
 	tick := time.Tick(time.Second)
 	start := time.Now()
 	total := make(ExchangeStats)
@@ -160,6 +170,8 @@ func collectAggregationsAndMakeFinalStat(collector <-chan ExchangeStats, amountO
 	go func() {
 		for {
 			select {
+			case <-ctx.Done():
+				return
 			case exchangeStat := <-collector:
 				collectAggregates(&total, exchangeStat)
 			case <-tick:
@@ -176,7 +188,8 @@ func collectAggregationsAndMakeFinalStat(collector <-chan ExchangeStats, amountO
 					id++
 
 					wholeExchangeStat := RoutingStat{}
-					for _, routingKey := range exchangeStat.sortedKeys() {
+					exchangeKeys := exchangeStat.sortedKeys()
+					for _, routingKey := range exchangeKeys {
 						routingKeyStat := exchangeStat.get(routingKey)
 
 						wholeExchangeStat.add((*routingKeyStat).Count, (*routingKeyStat).BodySize, (*routingKeyStat).MaxSize)
@@ -188,7 +201,7 @@ func collectAggregationsAndMakeFinalStat(collector <-chan ExchangeStats, amountO
 						id++
 					}
 
-					totalStat := wholeExchangeStat.stats(exchange, "#", dur)
+					totalStat := wholeExchangeStat.stats(exchange, RoutingKeyName(fmt.Sprintf("# (%d routing keys)", len(exchangeKeys))), dur)
 					statsList[exchangeId] = totalStat
 				}
 

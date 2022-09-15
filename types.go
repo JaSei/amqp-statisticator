@@ -29,13 +29,16 @@ type Stats struct {
 	AvgBodySizePerSec uint64         `json:"avg_body_size_per_sec"`
 	MaxSize           uint64         `json:"max_size"`
 	TotalSize         uint64         `json:"total_size"`
+	Duration          float64        `json:"seconds_since_start"`
 }
 
 func (st RoutingStat) stats(exchange ExchangeName, routingKey RoutingKeyName, dur time.Duration) Stats {
-	ret := Stats{Exchange: exchange, RoutingKey: routingKey, Count: st.Count, MaxSize: st.MaxSize, TotalSize: st.BodySize}
+	ret := Stats{Exchange: exchange, RoutingKey: routingKey, Count: st.Count, MaxSize: st.MaxSize, TotalSize: st.BodySize, Duration: dur.Seconds()}
 
 	ret.AvgMsgPerSec = float64(st.Count) / dur.Seconds()
-	ret.AvgBodySize = st.BodySize / st.Count
+	if st.Count > 0 {
+		ret.AvgBodySize = st.BodySize / st.Count
+	}
 	ret.AvgBodySizePerSec = uint64(float64(st.BodySize) / dur.Seconds())
 
 	return ret

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/tls"
 	"crypto/x509"
 	"log"
@@ -12,9 +13,10 @@ import (
 type AMQP struct {
 	connection *amqp.Connection
 	channel    *amqp.Channel
+	ctx        context.Context
 }
 
-func newAmqp() AMQP {
+func newAmqp(ctx context.Context) AMQP {
 	cfg := new(tls.Config)
 	if *amqpCaCert != "" {
 		cacertfile, err := pathutil.New(*amqpCaCert)
@@ -57,11 +59,11 @@ func newAmqp() AMQP {
 		}
 	}
 
-	return AMQP{conn, c}
+	return AMQP{conn, c, ctx}
 }
 
 //StartConsumers start consumer pool defined by function
-func (a AMQP) StartConsumers(queue string, countOfConsumers uint8, consumerFunc func(<-chan amqp.Delivery, chan<- ExchangeStats)) <-chan ExchangeStats {
+func (a AMQP) StartConsumers(queue string, countOfConsumers uint8, consumerFunc func(context.Context, <-chan amqp.Delivery, chan<- ExchangeStats)) <-chan ExchangeStats {
 	collector := make(chan ExchangeStats, 128)
 
 	q, err := a.channel.Consume(queue, *consumerName, false, false, false, false, nil)
@@ -70,7 +72,7 @@ func (a AMQP) StartConsumers(queue string, countOfConsumers uint8, consumerFunc 
 			log.Fatalf("basic.consume: %v", err)
 		}
 
-		go consumerFunc(q, collector)
+		go consumerFunc(a.ctx, q, collector)
 	}
 
 	return collector
